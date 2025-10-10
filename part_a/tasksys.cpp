@@ -1,5 +1,9 @@
 #include "tasksys.h"
 
+#include <thread>
+#include <vector>
+
+using namespace std;
 
 IRunnable::~IRunnable() {}
 
@@ -49,27 +53,28 @@ const char* TaskSystemParallelSpawn::name() {
 }
 
 TaskSystemParallelSpawn::TaskSystemParallelSpawn(int num_threads): ITaskSystem(num_threads) {
-    //
-    // TODO: CS149 student implementations may decide to perform setup
-    // operations (such as thread pool construction) here.
-    // Implementations are free to add new class member variables
-    // (requiring changes to tasksys.h).
-    //
+    maxNumThreads = num_threads;
 }
 
 TaskSystemParallelSpawn::~TaskSystemParallelSpawn() {}
 
+void invoke_runnable(IRunnable* runnable, int threadId, int num_total_tasks, int num_threads) {
+    int taskId = threadId;
+    while (taskId < num_total_tasks) {
+        runnable->runTask(taskId, num_total_tasks);
+        taskId += num_threads;
+    }
+}
+
 void TaskSystemParallelSpawn::run(IRunnable* runnable, int num_total_tasks) {
+    vector<thread> threads(maxNumThreads);
 
+    for (int threadId = 0; threadId < maxNumThreads; threadId++) {
+        threads[threadId] = thread(invoke_runnable, runnable, threadId, num_total_tasks, maxNumThreads);
+    }
 
-    //
-    // TODO: CS149 students will modify the implementation of this
-    // method in Part A.  The implementation provided below runs all
-    // tasks sequentially on the calling thread.
-    //
-
-    for (int i = 0; i < num_total_tasks; i++) {
-        runnable->runTask(i, num_total_tasks);
+    for (thread &th : threads) {
+        th.join();
     }
 }
 
