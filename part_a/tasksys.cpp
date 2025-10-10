@@ -106,6 +106,29 @@ TaskSystemParallelThreadPoolSpinning::TaskSystemParallelThreadPoolSpinning(int n
     // Implementations are free to add new class member variables
     // (requiring changes to tasksys.h).
     //
+    threads = vector<thread>(num_threads);
+    for (int i = 0; i < num_threads; i++) {
+        threads[i] = thread(&TaskSystemParallelThreadPoolSpinning::threadFunc, this);
+    }
+    tasks_remaining = 0;
+    num_total_tasks = 0;
+    done = false;
+}
+
+void TaskSystemParallelThreadPoolSpinning::threadFunc() {
+    // Thread function implementation goes here
+    while (true) {
+        // Get a ticket.
+        if (tasks_remaining > 0) {
+            lock.lock();
+            int work_ticket = tasks_remaining--;
+            lock.unlock();
+            runnable->runTask(work_ticket, num_total_tasks);
+            if (tasks_remaining == 0){
+
+            }
+        }
+    }
 }
 
 TaskSystemParallelThreadPoolSpinning::~TaskSystemParallelThreadPoolSpinning() {}
@@ -118,9 +141,14 @@ void TaskSystemParallelThreadPoolSpinning::run(IRunnable* runnable, int num_tota
     // method in Part A.  The implementation provided below runs all
     // tasks sequentially on the calling thread.
     //
+    done = false;
+    tasks_remaining = num_total_tasks; 
+    this.num_total_tasks = num_total_tasks;
 
-    for (int i = 0; i < num_total_tasks; i++) {
-        runnable->runTask(i, num_total_tasks);
+    while (true) {
+        if (done) {
+            break;
+        }
     }
 }
 
