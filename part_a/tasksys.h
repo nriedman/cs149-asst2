@@ -3,6 +3,13 @@
 
 #include "itasksys.h"
 
+#include <atomic>
+#include <thread>
+#include <vector>
+#include <mutex>
+
+using namespace std;
+
 /*
  * TaskSystemSerial: This class is the student's implementation of a
  * serial task execution engine.  See definition of ITaskSystem in
@@ -56,10 +63,14 @@ class TaskSystemParallelThreadPoolSpinning: public ITaskSystem {
     private:
         vector<thread> threads;
         void threadFunc();
-        atomic<int> tasks_remaining;
-        int maxNumThreads;
-        int num_total_tasks;
-        bool done;
+
+        atomic<int> tasks_remaining_;
+        int num_total_tasks_;
+        bool done_;
+
+        IRunnable* runnable_;
+
+        mutex lock_;
 };
 
 /*

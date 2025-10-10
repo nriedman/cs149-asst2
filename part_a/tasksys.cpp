@@ -1,10 +1,5 @@
 #include "tasksys.h"
 
-#include <thread>
-#include <vector>
-
-using namespace std;
-
 IRunnable::~IRunnable() {}
 
 ITaskSystem::ITaskSystem(int num_threads) {}
@@ -110,22 +105,30 @@ TaskSystemParallelThreadPoolSpinning::TaskSystemParallelThreadPoolSpinning(int n
     for (int i = 0; i < num_threads; i++) {
         threads[i] = thread(&TaskSystemParallelThreadPoolSpinning::threadFunc, this);
     }
-    tasks_remaining = 0;
-    num_total_tasks = 0;
-    done = false;
+    tasks_remaining_ = 0;
+    num_total_tasks_ = 0;
+    done_ = false;
+    runnable_ = nullptr;
 }
 
 void TaskSystemParallelThreadPoolSpinning::threadFunc() {
     // Thread function implementation goes here
     while (true) {
         // Get a ticket.
-        if (tasks_remaining > 0) {
-            lock.lock();
-            int work_ticket = tasks_remaining--;
-            lock.unlock();
-            runnable->runTask(work_ticket, num_total_tasks);
-            if (tasks_remaining == 0){
+        if (tasks_remaining_ > 0) {
+            lock_.lock();
+            int work_ticket;
+            if (tasks_remaining_ > 0) {
+                work_ticket = tasks_remaining_--;
+            } else {
+                lock_.unlock();
+                continue;
+            }
+            lock_.unlock();
 
+            runnable_->runTask(work_ticket, num_total_tasks_);
+            if (tasks_remaining_ == 0){
+                done_ = true;
             }
         }
     }
@@ -134,22 +137,19 @@ void TaskSystemParallelThreadPoolSpinning::threadFunc() {
 TaskSystemParallelThreadPoolSpinning::~TaskSystemParallelThreadPoolSpinning() {}
 
 void TaskSystemParallelThreadPoolSpinning::run(IRunnable* runnable, int num_total_tasks) {
-
-
-    //
-    // TODO: CS149 students will modify the implementation of this
-    // method in Part A.  The implementation provided below runs all
-    // tasks sequentially on the calling thread.
-    //
-    done = false;
-    tasks_remaining = num_total_tasks; 
-    this.num_total_tasks = num_total_tasks;
-
+    done_ = false;
+    runnable_ = runnable;
+    tasks_remaining_ = num_total_tasks; 
+    num_total_tasks_ = num_total_tasks;
+    
     while (true) {
-        if (done) {
+        if (done_) {
             break;
         }
     }
+
+    runnable_ = nullptr;
+    done_ = false;
 }
 
 TaskID TaskSystemParallelThreadPoolSpinning::runAsyncWithDeps(IRunnable* runnable, int num_total_tasks,
