@@ -1,5 +1,8 @@
 #include "tasksys.h"
 
+#include <optional>
+#include <iostream>
+
 IRunnable::~IRunnable() {}
 
 ITaskSystem::ITaskSystem(int num_threads) {}
@@ -101,35 +104,38 @@ TaskSystemParallelThreadPoolSpinning::TaskSystemParallelThreadPoolSpinning(int n
     // Implementations are free to add new class member variables
     // (requiring changes to tasksys.h).
     //
+    tasks_remaining_ = 0;
+    num_total_tasks_ = 0;
+    runnable_ = nullptr;
+    tasks_complete_ = 0;
+
     threads = vector<thread>(num_threads);
     for (int i = 0; i < num_threads; i++) {
         threads[i] = thread(&TaskSystemParallelThreadPoolSpinning::threadFunc, this);
     }
-    tasks_remaining_ = 0;
-    num_total_tasks_ = 0;
-    done_ = false;
-    runnable_ = nullptr;
 }
 
 void TaskSystemParallelThreadPoolSpinning::threadFunc() {
     // Thread function implementation goes here
     while (true) {
-        // Get a ticket.
-        if (tasks_remaining_ > 0) {
-            lock_.lock();
-            int work_ticket;
-            if (tasks_remaining_ > 0) {
-                work_ticket = tasks_remaining_--;
-            } else {
-                lock_.unlock();
-                continue;
-            }
-            lock_.unlock();
+        std::pair<int, bool> work_ticket = { 0, false };
 
-            runnable_->runTask(work_ticket, num_total_tasks_);
-            if (tasks_remaining_ == 0){
-                done_ = true;
-            }
+        lock_.lock();
+
+        if ( tasks_remaining_ > 0 ) {
+            std::cout << "Taking work ticket: " << tasks_remaining_ << std::endl;
+            work_ticket = { tasks_remaining_--, true };
+        }
+
+        lock_.unlock();
+
+        if ( work_ticket.second ) {
+            runnable_->runTask(work_ticket.first - 1, num_total_tasks_);
+
+            lock_.lock();
+            std::cout << "Work ticket: [" << work_ticket.first << "] done. " << tasks_complete_ + 1 << " tasks complete." << std::endl;
+            tasks_complete_++;
+            lock_.unlock();
         }
     }
 }
@@ -137,19 +143,32 @@ void TaskSystemParallelThreadPoolSpinning::threadFunc() {
 TaskSystemParallelThreadPoolSpinning::~TaskSystemParallelThreadPoolSpinning() {}
 
 void TaskSystemParallelThreadPoolSpinning::run(IRunnable* runnable, int num_total_tasks) {
-    done_ = false;
+    lock_.lock();
+
     runnable_ = runnable;
     tasks_remaining_ = num_total_tasks; 
     num_total_tasks_ = num_total_tasks;
+    tasks_complete_ = 0;
+
+    lock_.unlock();
     
-    while (true) {
-        if (done_) {
+    while ( true ) {
+        lock_.lock();
+        if ( tasks_complete_ == num_total_tasks_ ) {
+            std::cout << "Done!" << std::endl;
+            lock_.unlock();
             break;
         }
+        lock_.unlock();
     }
 
+    lock_.lock();
+
     runnable_ = nullptr;
-    done_ = false;
+    num_total_tasks_ = 0;
+    tasks_complete_ = 0;
+
+    lock_.unlock();
 }
 
 TaskID TaskSystemParallelThreadPoolSpinning::runAsyncWithDeps(IRunnable* runnable, int num_total_tasks,

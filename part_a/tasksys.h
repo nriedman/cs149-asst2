@@ -65,8 +65,8 @@ class TaskSystemParallelThreadPoolSpinning: public ITaskSystem {
         void threadFunc();
 
         atomic<int> tasks_remaining_;
-        int num_total_tasks_;
-        bool done_;
+        atomic<int> num_total_tasks_;
+        atomic<int> tasks_complete_;
 
         IRunnable* runnable_;
 
