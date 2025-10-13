@@ -118,12 +118,14 @@ TaskSystemParallelThreadPoolSpinning::TaskSystemParallelThreadPoolSpinning(int n
 void TaskSystemParallelThreadPoolSpinning::threadFunc() {
     // Thread function implementation goes here
     while (true) {
+        if ( kill_threads_ )
+            break;
+
         std::pair<int, bool> work_ticket = { 0, false };
 
         lock_.lock();
 
         if ( tasks_remaining_ > 0 ) {
-            std::cout << "Taking work ticket: " << tasks_remaining_ << std::endl;
             work_ticket = { tasks_remaining_--, true };
         }
 
@@ -133,42 +135,42 @@ void TaskSystemParallelThreadPoolSpinning::threadFunc() {
             runnable_->runTask(work_ticket.first - 1, num_total_tasks_);
 
             lock_.lock();
-            std::cout << "Work ticket: [" << work_ticket.first << "] done. " << tasks_complete_ + 1 << " tasks complete." << std::endl;
             tasks_complete_++;
+
+            if ( tasks_complete_ == num_total_tasks_ )
+                run_complete_.notify_all();
+            
             lock_.unlock();
         }
     }
 }
 
-TaskSystemParallelThreadPoolSpinning::~TaskSystemParallelThreadPoolSpinning() {}
+TaskSystemParallelThreadPoolSpinning::~TaskSystemParallelThreadPoolSpinning() {
+    kill_threads_ = true;
+    for (thread &th : threads) {
+        th.join();
+    }
+}
 
 void TaskSystemParallelThreadPoolSpinning::run(IRunnable* runnable, int num_total_tasks) {
-    lock_.lock();
 
+    std::unique_lock<std::mutex> unique_lock(lock_);
+
+    // Set up tasks.
     runnable_ = runnable;
-    tasks_remaining_ = num_total_tasks; 
+    tasks_remaining_ = num_total_tasks;
     num_total_tasks_ = num_total_tasks;
     tasks_complete_ = 0;
 
-    lock_.unlock();
-    
-    while ( true ) {
-        lock_.lock();
-        if ( tasks_complete_ == num_total_tasks_ ) {
-            std::cout << "Done!" << std::endl;
-            lock_.unlock();
-            break;
-        }
-        lock_.unlock();
-    }
+    // Wait for tasks to finish.
+    run_complete_.wait(unique_lock);
 
-    lock_.lock();
-
+    // Clean up.
     runnable_ = nullptr;
     num_total_tasks_ = 0;
     tasks_complete_ = 0;
 
-    lock_.unlock();
+    unique_lock.unlock();
 }
 
 TaskID TaskSystemParallelThreadPoolSpinning::runAsyncWithDeps(IRunnable* runnable, int num_total_tasks,

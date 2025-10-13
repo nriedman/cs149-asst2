@@ -6,7 +6,9 @@
 #include <atomic>
 #include <thread>
 #include <vector>
+
 #include <mutex>
+#include <condition_variable>
 
 using namespace std;
 
@@ -71,6 +73,10 @@ class TaskSystemParallelThreadPoolSpinning: public ITaskSystem {
         IRunnable* runnable_;
 
         mutex lock_;
+
+        condition_variable run_complete_;
+
+        atomic<bool> kill_threads_ { false };
 };
 
 /*
