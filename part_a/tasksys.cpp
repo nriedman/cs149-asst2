@@ -165,6 +165,8 @@ void TaskSystemParallelThreadPoolSleeping::threadLoop() {
             int newly_done = end - start;
             int after = completed_tasks_.fetch_add(newly_done, std::memory_order_relaxed) + newly_done;
             if (after == total_tasks_) {
+                // ARM-safe: update predicate under the mutex before notifying
+                std::lock_guard<std::mutex> g(mtx_);
                 has_work_.store(false, std::memory_order_release);
                 cv_done_.notify_one();
             }
@@ -200,6 +202,7 @@ void TaskSystemParallelThreadPoolSleeping::run(IRunnable* runnable, int num_tota
     else if (per_thread > 4) batch = 4;
     else batch = 1;
     batch_size_.store(batch, std::memory_order_relaxed);
+    // ARM-safe: set predicate while holding the mutex before notifying
     has_work_.store(true, std::memory_order_release);
     int kBatch = batch_size_.load(std::memory_order_relaxed);
     // For small workloads per thread, wake only the needed workers; otherwise wake all
