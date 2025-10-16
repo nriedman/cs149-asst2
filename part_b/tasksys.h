@@ -3,6 +3,40 @@
 
 #include "itasksys.h"
 
+#include <thread>
+
+#include <queue>
+#include <mutex>
+#include <atomic>
+#include <condition_variable>
+
+#include <vector>
+#include <unordered_map>
+#include <set>
+
+struct TaskRunArgs {
+    IRunnable* const runnable;
+    const int num_total_tasks;
+
+    TaskRunArgs(IRunnable* const runnable, const int num_total_tasks)
+        : runnable(runnable), num_total_tasks(num_total_tasks) {}
+};
+
+struct TaskState {
+    const TaskID id;
+    const TaskRunArgs run_args;
+    
+    std::vector<TaskID> dependents {};
+
+    std::atomic<int> num_blocking_dependencies { 0 };
+    std::atomic<int> available_work_tickets;
+    std::atomic<int> tasks_completed { 0 };
+
+    TaskState(const TaskID id, IRunnable* const runnable, const int num_total_tasks)
+        : id(id), run_args(runnable, num_total_tasks), available_work_tickets(num_total_tasks)
+        {}
+};
+
 /*
  * TaskSystemSerial: This class is the student's implementation of a
  * serial task execution engine.  See definition of ITaskSystem in
@@ -68,6 +102,27 @@ class TaskSystemParallelThreadPoolSleeping: public ITaskSystem {
         TaskID runAsyncWithDeps(IRunnable* runnable, int num_total_tasks,
                                 const std::vector<TaskID>& deps);
         void sync();
+    private:
+        // Thread pool
+        std::vector<std::thread> threads_;
+        void thread_work_fn();
+        std::atomic<bool> kill_threads_ { false };
+
+        // Sync
+        std::mutex* global_lock_;
+        std::condition_variable* cv_;
+
+        // Global task registry
+        std::atomic<unsigned TaskID> next_task_id_ { 0 };
+        std::unordered_map<TaskID, TaskState*> task_registry_ {};
+        
+        // In progress
+        void enqueue_tasks(const std::vector<TaskID>&);    // blocked -> in progress
+        std::queue<TaskID> ready_queue_ {};
+
+        // Finished
+        void mark_task_complete(const TaskID);  // in progress -> complete
+        std::set<TaskID> completed_tasks_ {};
 };
 
 #endif
