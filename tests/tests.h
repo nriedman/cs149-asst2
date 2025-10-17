@@ -60,57 +60,108 @@ typedef struct {
 /*
  * Implement your task here
 */
-class YourTask : public IRunnable {
+class PrimeFactorsTask : public IRunnable {
     public:
-        YourTask() {}
-        ~YourTask() {}
-        void runTask(int task_id, int num_total_tasks) {}
+        long long n_;
+        std::vector<long long> *output_;
+
+        PrimeFactorsTask(long long n, std::vector<long long> *output) : n_(n), output_(output) {}
+        ~PrimeFactorsTask() {}
+
+        static inline std::vector<long long> prime_factors(long long n) {
+            std::vector<long long> factors;
+
+            // Handle factor 2 separately
+            while (n % 2 == 0) {
+                factors.push_back(2);
+                n /= 2;
+            }
+
+            // Check odd factors up to sqrt(n)
+            for (long long i = 3; i * i <= n; i += 2) {
+                while (n % i == 0) {
+                    factors.push_back(i);
+                    n /= i;
+                }
+            }
+
+            // If n is still greater than 1, it's a prime factor
+            if (n > 1) {
+                factors.push_back(n);
+            }
+
+            return factors;
+        }
+
+        void runTask(int task_id, int num_total_tasks) {
+            output_[task_id] = prime_factors(n_);
+        }
 };
 /*
  * Implement your test here. Call this function from a wrapper that passes in
  * do_async and num_elements. See `simpleTest`, `simpleTestSync`, and
  * `simpleTestAsync` as an example.
  */
-TestResults yourTest(ITaskSystem* t, bool do_async, int num_elements, int num_bulk_task_launches) {
-    // TODO: initialize your input and output buffers
-    int* output = new int[num_elements];
+TestResults primeFactorsTest(ITaskSystem* t, bool do_async) {
 
-    // TODO: instantiate your bulk task launches
+    int num_tasks = 256;
+    int num_bulk_task_launches = 30;
 
-    // Run the test
+    std::vector<long long>* output = new std::vector<long long>[num_bulk_task_launches * num_tasks];
+
+    long long stress_n = 600851475143;
+    std::vector<long long> expected_factors = { 71, 839, 1471, 6857 };
+
+    std::vector<PrimeFactorsTask*> prime_fac_tasks(num_bulk_task_launches);
+    for (int i = 0; i < num_bulk_task_launches; i++) {
+        prime_fac_tasks[i] = new PrimeFactorsTask(stress_n, output + i * num_tasks);
+    }
+
     double start_time = CycleTimer::currentSeconds();
     if (do_async) {
-        // TODO:
-        // initialize dependency vector
-        // make calls to t->runAsyncWithDeps and push TaskID to dependency vector
-        // t->sync() at end
+        std::vector<TaskID> deps; // Call runAsyncWithDeps without dependencies
+        for (int i = 0; i < num_bulk_task_launches; i++) {
+            t->runAsyncWithDeps(prime_fac_tasks[i], num_tasks, deps);
+        }
+        t->sync();
     } else {
-        // TODO: make calls to t->run
+        for (int i = 0; i < num_bulk_task_launches; i++) {
+            t->run(prime_fac_tasks[i], num_tasks);
+        }
     }
     double end_time = CycleTimer::currentSeconds();
 
-    // Correctness validation
-    TestResults results;
-    results.passed = true;
-
-    for (int i=0; i<num_elements; i++) {
-        int value = 0; // TODO: initialize value
-        for (int j=0; j<num_bulk_task_launches; j++) {
-            // TODO: update value as expected
-        }
-
-        int expected = value;
-        if (output[i] != expected) {
-            results.passed = false;
-            printf("%d: %d expected=%d\n", i, output[i], expected);
-            break;
+    // Validate correctness 
+    TestResults result;
+    result.passed = true;
+    for (int i = 0; i < num_tasks * num_bulk_task_launches; i++) {
+        for (size_t f = 0; f < expected_factors.size(); f++) {
+            if (output[i][f] != expected_factors[f]) {
+                for (long long val : output[i]) {
+                    printf("%lld ", val);
+                }
+                printf("\n");
+                result.passed = false;
+                break;
+            }
         }
     }
-    results.time = end_time - start_time;
+    result.time = end_time - start_time;
 
     delete [] output;
+    for (int i = 0; i < num_bulk_task_launches; i++) {
+        delete prime_fac_tasks[i];
+    }
 
-    return results;
+    return result;
+}
+
+TestResults primeFactorsTestSync(ITaskSystem* t) {
+    return primeFactorsTest(t, false);
+}
+
+TestResults primeFactorsTestAsync(ITaskSystem* t) {
+    return primeFactorsTest(t, true);
 }
 
 /*
