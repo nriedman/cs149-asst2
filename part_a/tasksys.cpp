@@ -117,30 +117,22 @@ TaskSystemParallelThreadPoolSpinning::TaskSystemParallelThreadPoolSpinning(int n
 
 void TaskSystemParallelThreadPoolSpinning::threadFunc() {
     // Thread function implementation goes here
-    while (true) {
-        if ( kill_threads_ )
-            break;
-
-        std::pair<int, bool> work_ticket = { 0, false };
-
-        lock_.lock();
-
-        if ( tasks_remaining_ > 0 ) {
-            work_ticket = { tasks_remaining_--, true };
-        }
-
-        lock_.unlock();
-
-        if ( work_ticket.second ) {
-            runnable_->runTask(work_ticket.first - 1, num_total_tasks_);
-
-            lock_.lock();
-            tasks_complete_++;
-
-            if ( tasks_complete_ == num_total_tasks_ )
-                run_complete_.notify_all();
+    while (!kill_threads_.load()) {
+        int task_id = tasks_remaining_.fetch_sub(1) - 1;
+        
+        if (task_id >= 0) {
+            int total = num_total_tasks_.load();
+            IRunnable* r = runnable_;
             
-            lock_.unlock();
+            if (r) {
+                r->runTask(task_id, total);
+                
+                int completed = tasks_complete_.fetch_add(1) + 1;
+                if (completed == total) {
+                    std::lock_guard<std::mutex> g(lock_);
+                    run_complete_.notify_all();
+                }
+            }
         }
     }
 }
@@ -153,24 +145,20 @@ TaskSystemParallelThreadPoolSpinning::~TaskSystemParallelThreadPoolSpinning() {
 }
 
 void TaskSystemParallelThreadPoolSpinning::run(IRunnable* runnable, int num_total_tasks) {
-
-    std::unique_lock<std::mutex> unique_lock(lock_);
-
-    // Set up tasks.
+    // Set up tasks
     runnable_ = runnable;
-    tasks_remaining_ = num_total_tasks;
-    num_total_tasks_ = num_total_tasks;
-    tasks_complete_ = 0;
+    num_total_tasks_.store(num_total_tasks);
+    tasks_complete_.store(0);
+    tasks_remaining_.store(num_total_tasks);
 
-    // Wait for tasks to finish.
-    run_complete_.wait(unique_lock);
+    // Wait for tasks to finish
+    std::unique_lock<std::mutex> unique_lock(lock_);
+    run_complete_.wait(unique_lock, [this] { 
+        return tasks_complete_.load() >= num_total_tasks_.load(); 
+    });
 
-    // Clean up.
+    // Clean up
     runnable_ = nullptr;
-    num_total_tasks_ = 0;
-    tasks_complete_ = 0;
-
-    unique_lock.unlock();
 }
 
 TaskID TaskSystemParallelThreadPoolSpinning::runAsyncWithDeps(IRunnable* runnable, int num_total_tasks,
@@ -197,45 +185,54 @@ const char* TaskSystemParallelThreadPoolSleeping::name() {
 TaskSystemParallelThreadPoolSleeping::TaskSystemParallelThreadPoolSleeping(int num_threads): ITaskSystem(num_threads) {
     num_threads_ = num_threads;
     threads_ = new std::thread[num_threads];
-    finish_ = false;
+    finish_.store(false);
     runnable_ = nullptr;
-    num_total_tasks_ = 0;
-    cur_task_ = 0;
-    num_finished_task_ = 0;
+    num_total_tasks_.store(0);
+    cur_task_.store(0);
+    num_finished_task_.store(0);
 
     for (int i = 0; i < num_threads; ++i) {
         threads_[i] = std::thread([this] {
-            std::unique_lock<std::mutex> lock(this->lock_);
             while (true) {
-                // wait until there's work or shutdown
-                this->runtracker_.wait(lock, [this] {
-                    return this->finish_ || (this->runnable_ && this->cur_task_ < this->num_total_tasks_);
-                });
-                if (this->finish_) {
-                    break;
+                int task_id = -1;
+                IRunnable *r = nullptr;
+                int total = 0;
+
+                // try to claim a task atomically
+                {
+                    std::unique_lock<std::mutex> lock(this->lock_);
+                    
+                    // wait until there's work or shutdown
+                    this->runtracker_.wait(lock, [this] {
+                        return this->finish_.load() || 
+                               (this->runnable_ && this->cur_task_.load() < this->num_total_tasks_.load());
+                    });
+
+                    if (this->finish_.load()) {
+                        break;
+                    }
+
+                    // claim next task if available
+                    if (this->runnable_) {
+                        task_id = this->cur_task_.fetch_add(1);
+                        total = this->num_total_tasks_.load();
+                        if (task_id < total) {
+                            r = this->runnable_;
+                        }
+                    }
                 }
-                // claim next task if available
-                if (!this->runnable_ || this->cur_task_ >= this->num_total_tasks_) {
-                    // spurious wake or race, continue waiting
-                    continue;
+
+                // execute task outside the lock
+                if (r && task_id < total) {
+                    r->runTask(task_id, total);
+                    
+                    // update completion count
+                    int finished = this->num_finished_task_.fetch_add(1) + 1;
+                    if (finished >= total) {
+                        std::lock_guard<std::mutex> g(this->lock_);
+                        this->cv_done_.notify_all();
+                    }
                 }
-                int task_id = this->cur_task_++;
-                IRunnable *r = this->runnable_;
-                int total = this->num_total_tasks_;
-                // if we've handed out the last task, clear runnable_ to block new claims until next run
-                if (this->cur_task_ >= this->num_total_tasks_) {
-                    this->runnable_ = nullptr;
-                }
-                // run task outside the lock
-                lock.unlock();
-                r->runTask(task_id, total);
-                // after finishing, update completion count and notify if done
-                lock.lock();
-                int finished = ++this->num_finished_task_;
-                if (finished >= total) {
-                    this->cv_done_.notify_all();
-                }
-                // loop continues to wait for more work or shutdown
             }
         });
     }
@@ -244,7 +241,7 @@ TaskSystemParallelThreadPoolSleeping::TaskSystemParallelThreadPoolSleeping(int n
 TaskSystemParallelThreadPoolSleeping::~TaskSystemParallelThreadPoolSleeping() {
     {
         std::lock_guard<std::mutex> g(lock_);
-        finish_ = true;
+        finish_.store(true);
     }
     runtracker_.notify_all();
     for (int i = 0; i < num_threads_; ++i) {
@@ -258,15 +255,17 @@ void TaskSystemParallelThreadPoolSleeping::run(IRunnable* runnable, int num_tota
     {
         std::lock_guard<std::mutex> g(lock_);
         runnable_ = runnable;
-        num_total_tasks_ = num_total_tasks;
-        cur_task_ = 0;
-        num_finished_task_ = 0;
+        num_total_tasks_.store(num_total_tasks);
+        cur_task_.store(0);
+        num_finished_task_.store(0);
     }
     // wake all workers to begin processing
     runtracker_.notify_all();
-    // wait for completion of all tasks
+    // wait for completion without busy-waiting
     std::unique_lock<std::mutex> lk(lock_);
-    cv_done_.wait(lk, [this] { return this->num_finished_task_ >= this->num_total_tasks_; });
+    cv_done_.wait(lk, [this] { 
+        return this->num_finished_task_.load() >= this->num_total_tasks_.load(); 
+    });
 }
 
 
