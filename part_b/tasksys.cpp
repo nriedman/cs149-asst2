@@ -154,43 +154,49 @@ TaskSystemParallelThreadPoolSleeping::~TaskSystemParallelThreadPoolSleeping() {
 }
 
 void TaskSystemParallelThreadPoolSleeping::thread_work_fn() {
-    while(!kill_threads_) {
-        // Wait for a work item to be on the queue.
-        std::unique_lock<std::mutex> lk(*global_lock_);
+    while(!kill_threads_.load()) {
+        TaskID id = 0;
+        TaskState* task_state = nullptr;
+        int ticket = -1;
+        IRunnable* runnable = nullptr;
+        int num_total_tasks = 0;
         
-        cv_->wait(lk, [this] { return !ready_queue_.empty() || kill_threads_; });
+        // Wait for a work item to be on the queue
+        {
+            std::unique_lock<std::mutex> lk(*global_lock_);
+            
+            cv_->wait(lk, [this] { return !ready_queue_.empty() || kill_threads_.load(); });
 
-        if ( ready_queue_.empty() )
-            continue;
+            if (kill_threads_.load())
+                break;
 
-        if (kill_threads_)
-            break;
-        
-        // Take a work ticket
-        TaskID id = ready_queue_.front();
-        TaskState* task_state = task_registry_.at(id);
-        int ticket = task_state->available_work_tickets.fetch_sub(1);
+            if (ready_queue_.empty())
+                continue;
+            
+            // Take a work ticket
+            id = ready_queue_.front();
+            task_state = task_registry_.at(id);
+            ticket = task_state->available_work_tickets.fetch_sub(1) - 1;
 
-        if ( task_state->available_work_tickets == 0 )
-            ready_queue_.pop();
-                
-        lk.unlock();
+            if (task_state->available_work_tickets.load() <= 0)
+                ready_queue_.pop();
+            
+            // Cache work info to minimize time holding lock
+            runnable = task_state->run_args.runnable;
+            num_total_tasks = task_state->run_args.num_total_tasks;
+        }
 
-        // Do the work
-        TaskRunArgs args = task_state->run_args;
-        args.runnable->runTask(ticket - 1, args.num_total_tasks);
+        // Do the work outside the lock
+        if (ticket >= 0 && runnable) {
+            runnable->runTask(ticket, num_total_tasks);
 
-        lk.lock();
+            // Update completion state
+            int completed = task_state->tasks_completed.fetch_add(1) + 1;
 
-        // Update the completion state
-        task_state->tasks_completed.fetch_add(1);
-
-        bool task_complete = task_state->tasks_completed.load() == task_state->run_args.num_total_tasks;
-
-        lk.unlock();
-
-        if ( task_complete )
-            mark_task_complete(task_state->id);
+            if (completed == num_total_tasks) {
+                mark_task_complete(id);
+            }
+        }
     }
 }
 
@@ -229,49 +235,51 @@ TaskID TaskSystemParallelThreadPoolSleeping::runAsyncWithDeps(IRunnable* runnabl
 
 void TaskSystemParallelThreadPoolSleeping::sync() {
     std::unique_lock<std::mutex> lk(*global_lock_);
-    while (completed_tasks_.size() < next_task_id_.load()) {
-        cv_->wait(lk);
-    }
+    cv_->wait(lk, [this] { 
+        return completed_tasks_.size() >= (size_t)next_task_id_.load(); 
+    });
 }
 
 void TaskSystemParallelThreadPoolSleeping::enqueue_tasks(const std::vector<TaskID>& tasks) {
-    std::unique_lock<std::mutex> lk(*global_lock_);
-
-    for ( const TaskID& taskID : tasks ) {
-        ready_queue_.push(taskID);
+    if (tasks.empty())
+        return;
+        
+    {
+        std::lock_guard<std::mutex> lk(*global_lock_);
+        for (const TaskID& taskID : tasks) {
+            ready_queue_.push(taskID);
+        }
     }
-
-    if ( ready_queue_.size() == tasks.size() ) {
-        lk.unlock();
-        cv_->notify_all();
-    }
+    cv_->notify_all();
 }
 
 void TaskSystemParallelThreadPoolSleeping::mark_task_complete(const TaskID taskID) {
-    std::unique_lock<std::mutex> lk(*global_lock_);
-
-    // Record the completion
-    completed_tasks_.insert(taskID);
-
-    // Collect batch of ready-to-go tasks
     std::vector<TaskID> unblocked_tasks;
+    bool all_tasks_complete = false;
+    
+    {
+        std::lock_guard<std::mutex> lk(*global_lock_);
 
-    // Notify waiting dependencies
-    for (TaskID& waiting_task : task_registry_.at(taskID)->dependents) {
-        task_registry_.at(waiting_task)->num_blocking_dependencies.fetch_sub(1);
+        // Record the completion
+        completed_tasks_.insert(taskID);
 
-        if ( task_registry_.at(waiting_task)->num_blocking_dependencies == 0 )
-            unblocked_tasks.push_back(waiting_task);
+        // Notify waiting dependencies
+        for (TaskID& waiting_task : task_registry_.at(taskID)->dependents) {
+            int prev = task_registry_.at(waiting_task)->num_blocking_dependencies.fetch_sub(1);
+            if (prev == 1) {
+                unblocked_tasks.push_back(waiting_task);
+            }
+        }
+
+        // Check if we're synced up
+        all_tasks_complete = completed_tasks_.size() == (size_t)next_task_id_.load();
     }
 
-    // If we're synced up, signal it!
-    bool all_tasks_complete = completed_tasks_.size() == next_task_id_.load();
-
-    lk.unlock();
-
-    if ( all_tasks_complete ) {
+    // Enqueue unblocked tasks (this will notify workers)
+    enqueue_tasks(unblocked_tasks);
+    
+    // If all tasks complete, also notify sync() waiters
+    if (all_tasks_complete) {
         cv_->notify_all();
     }
-
-    enqueue_tasks(unblocked_tasks);
 }
